@@ -10,10 +10,10 @@ MAC = TARGET = 1
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Do ARP poisoning between ' + 'a gateway and several ' + 'targets')
-    parser.add_argument('-i', '--interface', dest='interface', help='interface to send from')
-    parser.add_argument('-t', '--targets', dest='targets', help='comma-separated list of IP addresses', required=True)
-    parser.add_argument('-g', '--gateway', dest='gateway', help='IP address of the gateway', required=True)
+    parser = argparse.ArgumentParser(description='O envenenamento por ARP ocorre entre ' + 'um portal e vários ' + 'alvos')
+    parser.add_argument('-i', '--interface', dest='interface', help='interface para enviar')
+    parser.add_argument('-t', '--targets', dest='targets', help='lista de endereços IP separados por vírgulas', required=True)
+    parser.add_argument('-g', '--gateway', dest='gateway', help='Endereço IP do gateway', required=True)
     return parser.parse_args()
 
 

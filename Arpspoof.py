@@ -71,7 +71,7 @@ def restore_ARP_caches(targets, gateway, verbose=True):
     print('Parando o ataque, restaurando o cache ARP')
     for i in range(3):
         if verbose:
-            print("ARP %s is at %s" % (gateway[IP], gateway[MAC]))
+            print("ARP %s está em %s" % (gateway[IP], gateway[MAC]))
         for t in targets:
             if verbose:
                 print("ARP %s is at %s" % (t[IP], t[MAC]))

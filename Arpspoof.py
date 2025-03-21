@@ -7,7 +7,7 @@ import os
 import socket
 import struct
 import binascii
-import pcap
+import pylibpcap as pcap
 import dpkt
 from dpkt.ethernet import Ethernet
 from dpkt.arp import ARP

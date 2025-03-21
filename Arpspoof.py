@@ -136,6 +136,8 @@ def send_ARP_alternative(destination_IP, destination_MAC, source_IP, source_MAC)
 
 def packet_callback(packet, targets, gateway):
     """Função de callback para analisar pacotes capturados"""
+    print(f"\n[DEBUG] Pacote recebido: {packet.summary()}")
+    
     if IP in packet:
         ip_src = packet[IP].src
         ip_dst = packet[IP].dst

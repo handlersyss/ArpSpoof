@@ -192,14 +192,11 @@ def start_sniffer(interface, targets, gateway):
     
     # Criar filtro mais simples para capturar mais pacotes
     target_ips = [t[IP] for t in targets]
-    filters = []
     
-    # Adicionar filtros para cada combinação de gateway-alvo
-    for target_ip in target_ips:
-        filters.append(f"(host {target_ip} and host {gateway[IP]})")
+    # Filtro simplificado - capturar qualquer pacote IP (não apenas ARP)
+    # excluindo os próprios pacotes ARP de envenenamento
+    filter_expr = "ip and not arp"
     
-    # Combinar filtros com OR
-    filter_expr = " or ".join(filters)
     print(f"[*] Filtro de captura: {filter_expr}")
     
     # Iniciar o sniffer com armazenamento para debug
@@ -207,8 +204,8 @@ def start_sniffer(interface, targets, gateway):
         iface=interface,
         prn=lambda pkt: packet_callback(pkt, targets, gateway),
         filter=filter_expr,
-        store=True,  # Armazenar pacotes para poder verificar depois
-        count=0  # Capturar indefinidamente
+        store=True,
+        count=0
     )
     t.start()
     print(f"[*] Sniffer iniciado. Capturando pacotes...")

